@@ -257,9 +257,3 @@ python src/inference.py --ensemble --model_dir models/
 - [GeM Pooling](https://arxiv.org/abs/1711.02512)
 - [CutMix Augmentation](https://arxiv.org/abs/1905.04899)
 - [Progressive Resizing](https://www.fast.ai/posts/2018-04-30-dawnbench-fastai.html)
-
-## 👥 팀 정보 | Team Information
-
-- **참가자**: Shaun (정환)
-- **GitHub**: [@shaun0927](https://github.com/shaun0927)
-- **Competition**: [Dacon - Hecto AI Challenge 2025](https://dacon.io/)
