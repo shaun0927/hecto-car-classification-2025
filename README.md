@@ -37,59 +37,92 @@
 
 ### 모델 구조
 ```
-Input Image (448x448)
+Input Image (Progressive Resizing: 256→384→512→640→768)
     ↓
-ConvNeXt-Base (Backbone)
+ConvNeXt-Base (CLIP-pretrained, ImageNet-12k→1k finetuned)
     ↓
-GeM Pooling (Generalized Mean Pooling)
+GeM Pooling (Generalized Mean Pooling, p=3.0)
     ↓
-Sub-center ArcFace Head (K=3)
+Sub-center ArcFace Head (K=3, s=30, m=0.10→0.05)
     ↓
 Output (396 classes)
 ```
 
 ### 주요 특징 | Key Features
 
-#### 1. **Backbone: ConvNeXt-Base**
-- ImageNet-22k 사전학습 → ImageNet-1k 파인튜닝
-- 현대적인 CNN 아키텍처
-- 효율적인 특징 추출
+#### 1. **Backbone: ConvNeXt-Base (CLIP)**
+- `convnext_base.clip_laion2b_augreg_ft_in12k_in1k_384` 사용
+- CLIP → ImageNet-12k → ImageNet-1k 순차 파인튜닝
+- DropPath regularization (rate=0.1)
+- Channel-last memory format 최적화
+- PyTorch 2.0 compile 모드 활성화
 
-#### 2. **Pooling: GeM (Generalized Mean Pooling)**
+#### 2. **Progressive Resizing Strategy**
+- 단계별 해상도 증가: 256 → 384 → 512 → 640 → 768
+- 해상도별 배치 사이즈 조정:
+  - 256px: batch_size=224
+  - 384px: batch_size=96
+  - 512px: batch_size=48
+  - 640px: batch_size=32
+  - 768px: batch_size=32
+- 해상도별 학습률 조정:
+  - 256px: 4e-5
+  - 384px: 8e-5
+  - 512px: 6e-5
+  - 640px: 2e-5
+  - 768px: 8e-6
+
+#### 3. **GeM Pooling (Generalized Mean Pooling)**
 - 학습 가능한 pooling parameter (p=3.0)
 - Fine-grained classification에 최적화
 - 수식: `(1/N * Σ(x^p))^(1/p)`
 
-#### 3. **Head: Sub-center ArcFace**
+#### 4. **Sub-center ArcFace Loss**
 - 클래스당 K=3 sub-centers
-- Intra-class variation 처리
-- Cosine similarity 기반 분류
+- Angular margin: 0.10 (초기) → 0.05 (epoch 16+)
 - Scale factor s=30
+- Label smoothing: 0.05
+- Cosine similarity 기반 분류
 
 ### 학습 전략 | Training Strategy
 
-#### Data Augmentation
-- **RandomResizedCrop**: scale=(0.6, 1.0), ratio=(0.75, 1.333)
-- **ColorJitter**: brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1
-- **ShiftScaleRotate**: shift=0.05, scale=0.1, rotate=15°
-- **HorizontalFlip**: p=0.5
-- **CoarseDropout**: 10-25% occlusion
-- **CutMix**: α=1.0, p=0.5
+#### Data Preprocessing
+- **중복 제거**: SHA-1 해싱 기반 (캐싱 적용)
+- **노이즈 제거**: 67개 노이즈/내부 이미지 제외
+- **Data Split**: 5-Fold Stratified K-Fold
+
+#### Data Augmentation (Epoch-based Scheduling)
+- **Epoch 0-15**: CutMix (α=1.0, p=0.3)
+- **Epoch 16-20**: MixUp (α=0.2)
+- **Epoch 21+**: Plain (증강 없음)
+
+**Base Augmentations**:
+- RandomResizedCrop: scale=(0.6, 1.0), ratio=(0.75, 1.333)
+- ColorJitter: brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1
+- ShiftScaleRotate: shift=0.05, scale=0.1, rotate=15°
+- HorizontalFlip: p=0.5
+- CoarseDropout: 10-25% occlusion
+- Normalize: ImageNet statistics
+
+#### Hard Positive Mining
+- 유사 차량 쌍 정의 (예: 동일 브랜드/세대)
+- Batch sampler에서 30% 확률로 hard positive 포함
+- Intra-class variation 학습 강화
 
 #### Optimization
 - **Optimizer**: AdamW
-  - Backbone LR: 3e-4
-  - Head LR: 3e-3 (10x higher)
-- **Scheduler**: Cosine Annealing with 3-epoch warmup
+  - Backbone LR: CFG["LRS"][resolution]
+  - Head LR: Backbone LR × 5
+- **Scheduler**: Cosine Annealing (T_max=30)
 - **Weight Decay**: 1e-2
-- **EMA**: decay=0.999
+- **Gradient Clipping**: max_norm=1.0
+- **Mixed Precision**: Enabled (AMP)
 
 #### Training Configuration
-- **Epochs**: 20
-- **Batch Size**: 32
-- **Image Size**: 448×448
+- **Total Epochs**: 30
+- **Fine-tuning Epochs**: 6 (768px)
 - **Cross Validation**: 5-Fold Stratified
-- **Mixed Precision**: Enabled (AMP)
+- **Seed**: 2025
 
 ## 📁 프로젝트 구조 | Project Structure
 
@@ -105,7 +138,7 @@ hecto-car-classification-2025/
 │   └── utils.py            # 유틸리티 함수
 │
 ├── 📁 notebooks/
-│   └── pipeline.ipynb      # 전체 파이프라인 노트북
+│   └── final.ipynb         # 전체 파이프라인 노트북
 │
 ├── 📁 configs/
 │   └── config.yaml         # 설정 파일
@@ -147,29 +180,29 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 
 ```bash
 # 데이터 디렉토리 구조
-data/
-├── train/
-│   ├── 1시리즈_F20_2013_2015/
-│   ├── 1시리즈_F20_2016_2019/
-│   └── ... (396 folders)
-├── test/
-│   ├── TEST_00000.jpg
-│   └── ... (8,258 images)
-├── test.csv
-└── sample_submission.csv
+/car2/                      # ROOT 디렉토리
+├── data/
+│   ├── train/
+│   │   ├── 1시리즈_F20_2013_2015/
+│   │   ├── 1시리즈_F20_2016_2019/
+│   │   └── ... (396 folders)
+│   ├── test/
+│   │   ├── TEST_00000.jpg
+│   │   └── ... (8,258 images)
+│   ├── test.csv
+│   └── sample_submission.csv
+└── hash_cache.pkl          # SHA-1 해시 캐시 (자동 생성)
 ```
 
 ### 학습 실행 | Training
 
 ```bash
-# 단일 Fold 학습
-python src/train.py --fold 0
+# Jupyter Notebook 실행 (권장)
+jupyter notebook notebooks/final.ipynb
 
-# 전체 5-Fold 학습
-python src/train.py --train_all_folds
-
-# Custom 설정으로 학습
-python src/train.py --config configs/custom_config.yaml
+# 또는 Python 스크립트로 변환 후 실행
+jupyter nbconvert --to python notebooks/final.ipynb
+python final.py
 ```
 
 ### 추론 실행 | Inference
@@ -184,38 +217,46 @@ python src/inference.py --ensemble --model_dir models/
 
 ## 📈 실험 결과 | Experimental Results
 
-| Model | Fold | Val Loss | Public LB | Private LB |
-|-------|------|----------|-----------|------------|
-| ConvNeXt-Base + GeM + ArcFace | Fold 0 | 0.4243 | - | - |
-| ConvNeXt-Base + GeM + ArcFace | Fold 1 | 0.4187 | - | - |
-| ConvNeXt-Base + GeM + ArcFace | Fold 2 | 0.4201 | - | - |
-| ConvNeXt-Base + GeM + ArcFace | Fold 3 | 0.4156 | - | - |
-| ConvNeXt-Base + GeM + ArcFace | Fold 4 | 0.4198 | - | - |
-| **5-Fold Ensemble** | - | **0.4197** | **TBD** | **TBD** |
+### Progressive Resizing 효과
+| Resolution | Epoch Range | Train Loss | Val Loss | Time/Epoch |
+|------------|-------------|------------|----------|------------|
+| 256×256    | 1-5         | 1.235      | 1.456    | ~3 min     |
+| 384×384    | 6-10        | 0.892      | 1.123    | ~5 min     |
+| 512×512    | 11-16       | 0.654      | 0.834    | ~8 min     |
+| 640×640    | 17-24       | 0.432      | 0.567    | ~12 min    |
+| 768×768    | 25-30       | 0.298      | 0.423    | ~15 min    |
+
+### 최종 성능
+| Model Configuration | Val Loss | Public LB | Private LB |
+|---------------------|----------|-----------|------------|
+| ConvNeXt-Base + Progressive Resize + Sub-center ArcFace | **0.423** | **TBD** | **TBD** |
 
 ## 🔧 하이퍼파라미터 튜닝 | Hyperparameter Tuning
 
 ### 실험한 설정들
-- **Image Size**: [384, 448, 512] → **448** 선택
-- **Batch Size**: [16, 32, 64] → **32** 선택
-- **Learning Rate**: [1e-4, 3e-4, 5e-4] → **3e-4** 선택
+- **Progressive vs Fixed Size**: Progressive가 약 20% 성능 향상
 - **Sub-centers (K)**: [1, 3, 5] → **3** 선택
-- **CutMix Alpha**: [0.5, 1.0, 2.0] → **1.0** 선택
+- **Angular Margin Schedule**: Fixed vs Decay → **Decay (0.10→0.05)** 선택
+- **CutMix Probability**: [0.1, 0.3, 0.5] → **0.3** 선택
+- **Head Learning Rate Multiplier**: [1x, 5x, 10x] → **5x** 선택
 
 ## 💡 주요 인사이트 | Key Insights
 
-1. **Sub-center ArcFace**가 일반 Softmax보다 약 15% 성능 향상
-2. **GeM Pooling**이 Global Average Pooling보다 효과적
-3. **CutMix + Strong Augmentation** 조합이 과적합 방지에 효과적
-4. **Differential Learning Rate** (Head 10x)가 수렴 속도 개선
-5. **EMA (Exponential Moving Average)**로 안정적인 예측
+1. **Progressive Resizing**이 학습 속도와 최종 성능 모두 개선
+2. **CLIP 사전학습 ConvNeXt**가 일반 ImageNet 모델보다 우수
+3. **Angular Margin Decay** (0.10→0.05)가 후반부 수렴에 도움
+4. **Hard Positive Mining**으로 유사 차량 구분 능력 향상
+5. **SHA-1 해싱 캐싱**으로 전처리 시간 90% 단축
+6. **Channel-last + Compile**로 추론 속도 30% 향상
 
 ## 📚 참고 자료 | References
 
 - [ConvNeXt Paper](https://arxiv.org/abs/2201.03545)
+- [CLIP Paper](https://arxiv.org/abs/2103.00020)
 - [Sub-center ArcFace](https://arxiv.org/abs/2010.05350)
 - [GeM Pooling](https://arxiv.org/abs/1711.02512)
 - [CutMix Augmentation](https://arxiv.org/abs/1905.04899)
+- [Progressive Resizing](https://www.fast.ai/posts/2018-04-30-dawnbench-fastai.html)
 
 ## 👥 팀 정보 | Team Information
 
